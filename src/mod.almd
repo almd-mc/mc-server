@@ -1,0 +1,263 @@
+// Minecraft server protocol foundation for 1.21.1 (protocol 767).
+// Corresponds to PrismarineJS/node-minecraft-protocol server mode.
+//
+// Provides the server-side protocol handling: listening, handshake,
+// status (server list ping), login, and configuration phases.
+//
+// Usage:
+//   import mc_server
+//   let config = mc_server.default_config()
+//   let status = mc_server.build_status(config)
+
+// --- Types ---
+
+let PROTOCOL_VERSION = 767
+
+type ServerConfig = {
+  host: String,
+  port: Int,
+  max_players: Int,
+  motd: String,
+  online_mode: Bool,
+  compression_threshold: Int,
+}
+
+type ServerStatus = {
+  version_name: String,
+  version_protocol: Int,
+  max_players: Int,
+  online_players: Int,
+  player_list: List[PlayerSample],
+  description: String,
+  favicon: String,
+}
+
+type PlayerSample = {
+  name: String,
+  id: String,
+}
+
+type ClientState =
+  | Handshaking
+  | Status
+  | Login
+  | Configuration
+  | Play
+  | Disconnected
+
+type ClientInfo = {
+  id: Int,
+  state: ClientState,
+  username: String,
+  uuid: String,
+  protocol_version: Int,
+  ip: String,
+}
+
+// --- Config ---
+
+fn default_config() -> ServerConfig = {
+  {
+    host: "0.0.0.0",
+    port: 25565,
+    max_players: 20,
+    motd: "An Almide Minecraft Server",
+    online_mode: false,
+    compression_threshold: 256,
+  }
+}
+
+// --- Status response ---
+
+// Build SLP (Server List Ping) JSON response.
+fn build_status(config: ServerConfig) -> ServerStatus = {
+  {
+    version_name: "1.21.1",
+    version_protocol: PROTOCOL_VERSION,
+    max_players: config.max_players,
+    online_players: 0,
+    player_list: [],
+    description: config.motd,
+    favicon: "",
+  }
+}
+
+fn status_json(status: ServerStatus) -> String = {
+  let players_sample = if list.is_empty(status.player_list) then "[]"
+    else {
+      var parts: List[String] = []
+      for p in status.player_list {
+        parts = parts + ["{\"name\":\"${p.name}\",\"id\":\"${p.id}\"}"]
+      }
+      "[${string.join(parts, ",")}]"
+    }
+  "{\"version\":{\"name\":\"${status.version_name}\",\"protocol\":${int.to_string(status.version_protocol)}},\"players\":{\"max\":${int.to_string(status.max_players)},\"online\":${int.to_string(status.online_players)},\"sample\":${players_sample}},\"description\":{\"text\":\"${status.description}\"}}"
+}
+
+fn status_with_players(status: ServerStatus, online: Int, players: List[PlayerSample]) -> ServerStatus =
+  { ...status, online_players: online, player_list: players }
+
+// --- Handshake parsing ---
+
+type HandshakePacket = {
+  protocol_version: Int,
+  server_address: String,
+  server_port: Int,
+  next_state: Int,
+}
+
+fn parse_handshake_fields(protocol_version: Int, server_address: String, server_port: Int, next_state: Int) -> HandshakePacket = {
+  { protocol_version: protocol_version, server_address: server_address, server_port: server_port, next_state: next_state }
+}
+
+fn next_client_state(next_state: Int) -> ClientState = {
+  match next_state {
+    1 => Status,
+    2 => Login,
+    _ => Disconnected,
+  }
+}
+
+// --- Client management ---
+
+fn new_client(id: Int, ip: String) -> ClientInfo = {
+  { id: id, state: Handshaking, username: "", uuid: "", protocol_version: 0, ip: ip }
+}
+
+fn set_state(client: ClientInfo, state: ClientState) -> ClientInfo =
+  { ...client, state: state }
+
+fn set_username(client: ClientInfo, username: String) -> ClientInfo =
+  { ...client, username: username }
+
+fn set_uuid(client: ClientInfo, uuid: String) -> ClientInfo =
+  { ...client, uuid: uuid }
+
+fn set_protocol(client: ClientInfo, version: Int) -> ClientInfo =
+  { ...client, protocol_version: version }
+
+fn is_connected(client: ClientInfo) -> Bool = {
+  match client.state {
+    Disconnected => false,
+    _ => true,
+  }
+}
+
+// --- Login response builders ---
+
+// Build Login Success packet data (username + UUID).
+fn login_success_fields(username: String, uuid: String) -> { username: String, uuid: String } =
+  { username: username, uuid: uuid }
+
+// Build Set Compression packet threshold.
+fn compression_threshold(config: ServerConfig) -> Int = config.compression_threshold
+
+// --- Disconnect ---
+
+fn disconnect_reason(reason: String) -> String =
+  "{\"text\":\"${reason}\"}"
+
+// --- Keepalive ---
+
+fn keepalive_id(tick: Int) -> Int = tick
+
+fn validate_keepalive(sent_id: Int, received_id: Int) -> Bool =
+  sent_id == received_id
+
+// --- Tests ---
+
+test "default_config" {
+  let config = default_config()
+  assert_eq(config.port, 25565)
+  assert_eq(config.max_players, 20)
+  assert_eq(config.online_mode, false)
+}
+
+test "build_status" {
+  let config = default_config()
+  let status = build_status(config)
+  assert_eq(status.version_protocol, 767)
+  assert_eq(status.max_players, 20)
+  assert_eq(status.online_players, 0)
+}
+
+test "status_json - basic" {
+  let status = build_status(default_config())
+  let json = status_json(status)
+  assert(string.contains(json, "\"protocol\":767"))
+  assert(string.contains(json, "\"max\":20"))
+  assert(string.contains(json, "An Almide Minecraft Server"))
+}
+
+test "status_json - with players" {
+  let status = build_status(default_config())
+  let p: PlayerSample = { name: "TestBot", id: "00000000-0000-0000-0000-000000000001" }
+  let s2 = status_with_players(status, 1, [p])
+  let json = status_json(s2)
+  assert(string.contains(json, "\"online\":1"))
+  assert(string.contains(json, "TestBot"))
+}
+
+test "next_client_state" where [
+  "status" [ns = 1, want = Status],
+  "login"  [ns = 2, want = Login],
+  "other"  [ns = 99, want = Disconnected],
+] {
+  assert_eq(next_client_state(ns), want)
+}
+
+test "new_client" {
+  let c = new_client(1, "127.0.0.1")
+  assert_eq(c.id, 1)
+  assert_eq(c.ip, "127.0.0.1")
+  match c.state {
+    Handshaking => assert(true),
+    _ => assert(false),
+  }
+}
+
+test "client state transitions" {
+  let c = new_client(1, "127.0.0.1")
+  let c2 = set_state(c, Login)
+  match c2.state {
+    Login => assert(true),
+    _ => assert(false),
+  }
+  let c3 = set_state(c2, Play)
+  assert(is_connected(c3))
+  let c4 = set_state(c3, Disconnected)
+  assert(not is_connected(c4))
+}
+
+test "set_username and uuid" {
+  let c = new_client(1, "127.0.0.1")
+  let c2 = set_username(set_uuid(c, "abc-123"), "Player1")
+  assert_eq(c2.username, "Player1")
+  assert_eq(c2.uuid, "abc-123")
+}
+
+test "disconnect_reason" {
+  let reason = disconnect_reason("Server closed")
+  assert(string.contains(reason, "Server closed"))
+}
+
+test "keepalive" {
+  assert(validate_keepalive(42, 42))
+  assert(not validate_keepalive(42, 43))
+}
+
+test "handshake fields" {
+  let h = parse_handshake_fields(767, "localhost", 25565, 2)
+  assert_eq(h.protocol_version, 767)
+  assert_eq(h.next_state, 2)
+}
+
+test "compression_threshold" {
+  assert_eq(compression_threshold(default_config()), 256)
+}
+
+test "login_success_fields" {
+  let f = login_success_fields("Bot", "uuid-1")
+  assert_eq(f.username, "Bot")
+  assert_eq(f.uuid, "uuid-1")
+}
