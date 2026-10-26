@@ -89,7 +89,7 @@ fn status_json(status: ServerStatus) -> String = {
       for p in status.player_list {
         parts = parts + ["{\"name\":\"${p.name}\",\"id\":\"${p.id}\"}"]
       }
-      "[${string.join(parts, ",")}]"
+      "[${list.join(parts, ",")}]"
     }
   "{\"version\":{\"name\":\"${status.version_name}\",\"protocol\":${int.to_string(status.version_protocol)}},\"players\":{\"max\":${int.to_string(status.max_players)},\"online\":${int.to_string(status.online_players)},\"sample\":${players_sample}},\"description\":{\"text\":\"${status.description}\"}}"
 }
